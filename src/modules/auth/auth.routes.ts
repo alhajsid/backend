@@ -7,6 +7,7 @@ import { requireAuth, type AuthRequest } from '../../middleware/auth.middleware.
 import { hashPassword, verifyPassword } from '../../utils/password.js'
 import { encryptText, hashToken, randomToken } from '../../utils/crypto.js'
 import { signAccessToken } from '../../utils/jwt.js'
+import { isAllowedEmail, normalizeEmail } from '../../utils/allowed-emails.js'
 import { createOAuthClient, syncGoogleQuota } from '../google/google.service.js'
 
 export const authRouter = Router()
@@ -15,20 +16,6 @@ const registerSchema = z.object({ name: z.string().min(2), email: z.string().ema
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) })
 const refreshSchema = z.object({ refreshToken: z.string().min(1) })
 const googleExchangeSchema = z.object({ token: z.string().min(1) })
-
-const allowedEmails = new Set(
-  env.ALLOWED_EMAILS.split(',')
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean),
-)
-
-function normalizeEmail(email: string) {
-  return email.trim().toLowerCase()
-}
-
-function isAllowedEmail(email: string) {
-  return allowedEmails.has(normalizeEmail(email))
-}
 
 async function createSession(userId: string, req: AuthRequest) {
   const refreshToken = randomToken()
@@ -189,8 +176,11 @@ authRouter.post('/google/exchange', async (req, res, next) => {
 authRouter.post('/refresh', async (req, res, next) => {
   try {
     const body = refreshSchema.parse(req.body)
-    const session = await prisma.userSession.findFirst({ where: { refreshTokenHash: hashToken(body.refreshToken), revokedAt: null, expiresAt: { gt: new Date() } } })
-    if (!session) return res.status(401).json({ code: 'AUTH_SESSION_EXPIRED', message: 'Refresh token expired.' })
+    const session = await prisma.userSession.findFirst({
+      where: { refreshTokenHash: hashToken(body.refreshToken), revokedAt: null, expiresAt: { gt: new Date() } },
+      include: { user: { select: { email: true } } },
+    })
+    if (!session || !isAllowedEmail(session.user.email)) return res.status(401).json({ code: 'AUTH_SESSION_EXPIRED', message: 'Refresh token expired.' })
     return res.json({ accessToken: signAccessToken({ sub: session.userId, sid: session.id }) })
   } catch (error) {
     return next(error)
