@@ -16,6 +16,20 @@ const loginSchema = z.object({ email: z.string().email(), password: z.string().m
 const refreshSchema = z.object({ refreshToken: z.string().min(1) })
 const googleExchangeSchema = z.object({ token: z.string().min(1) })
 
+const allowedEmails = new Set(
+  env.ALLOWED_EMAILS.split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
+)
+
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase()
+}
+
+function isAllowedEmail(email: string) {
+  return allowedEmails.has(normalizeEmail(email))
+}
+
 async function createSession(userId: string, req: AuthRequest) {
   const refreshToken = randomToken()
   const expiresAt = new Date(Date.now() + env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000)
@@ -43,10 +57,12 @@ async function verifyCaptcha(token: string | undefined) {
 authRouter.post('/register', async (req, res, next) => {
   try {
     const body = registerSchema.parse(req.body)
+    const email = normalizeEmail(body.email)
+    if (!isAllowedEmail(email)) return res.status(403).json({ code: 'AUTH_EMAIL_NOT_ALLOWED', message: 'This email is not allowed to access this app.' })
     if (!(await verifyCaptcha(body.captchaToken))) return res.status(400).json({ code: 'CAPTCHA_FAILED', message: 'Captcha verification failed.' })
-    const existing = await prisma.user.findUnique({ where: { email: body.email } })
+    const existing = await prisma.user.findUnique({ where: { email } })
     if (existing) return res.status(409).json({ code: 'AUTH_EMAIL_TAKEN', message: 'Email already registered.' })
-    const user = await prisma.user.create({ data: { name: body.name, email: body.email, passwordHash: await hashPassword(body.password) } })
+    const user = await prisma.user.create({ data: { name: body.name, email, passwordHash: await hashPassword(body.password) } })
     const tokens = await createSession(user.id, req)
     return res.status(201).json({ ...tokens, user: { id: user.id, name: user.name, email: user.email } })
   } catch (error) {
@@ -57,7 +73,9 @@ authRouter.post('/register', async (req, res, next) => {
 authRouter.post('/login', async (req, res, next) => {
   try {
     const body = loginSchema.parse(req.body)
-    const user = await prisma.user.findUnique({ where: { email: body.email } })
+    const email = normalizeEmail(body.email)
+    if (!isAllowedEmail(email)) return res.status(403).json({ code: 'AUTH_EMAIL_NOT_ALLOWED', message: 'This email is not allowed to access this app.' })
+    const user = await prisma.user.findUnique({ where: { email } })
     if (!user || !(await verifyPassword(user.passwordHash, body.password))) return res.status(401).json({ code: 'AUTH_INVALID_CREDENTIALS', message: 'Invalid email or password.' })
     const tokens = await createSession(user.id, req)
     return res.json({ ...tokens, user: { id: user.id, name: user.name, email: user.email } })
@@ -100,8 +118,9 @@ authRouter.get('/google/callback', async (req, res) => {
     const oauth2 = google.oauth2({ version: 'v2', auth: client })
     const profile = await oauth2.userinfo.get()
     const providerAccountId = profile.data.id
-    const email = profile.data.email
+    const email = profile.data.email ? normalizeEmail(profile.data.email) : undefined
     if (!providerAccountId || !email) return res.redirect(`${env.FRONTEND_URL}/google-auth?status=error`)
+    if (!isAllowedEmail(email)) return res.redirect(`${env.FRONTEND_URL}/google-auth?status=not-allowed`)
 
     const name = profile.data.name || email.split('@')[0] || 'Google User'
     const user = await prisma.user.upsert({
